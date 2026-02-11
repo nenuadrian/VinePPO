@@ -69,7 +69,7 @@ def get_cuda_info():
     else:
         logger.warning("could not load any of: " + " ".join(libnames))
         return []
-
+    cuda = ctypes.CDLL("/usr/lib64/libcuda.so.1")
     nGpus = ctypes.c_int()
     name = b" " * 100
     cc_major = ctypes.c_int()
@@ -91,6 +91,8 @@ def get_cuda_info():
 
     if result != CUDA_SUCCESS:
         cuda.cuGetErrorString(result, ctypes.byref(error_str))
+        print(error_str)
+        print(result)
         logger.warning(
             "cuInit failed with error code %d: %s" % (result, error_str.value.decode())
         )
