@@ -380,7 +380,8 @@ class OpenAIVLLM(LLM):
             list_out.append(cached_out)
             yield out
 
-        cls.cache[key] = list_out
+        if key is not None:
+            cls.cache[key] = list_out
 
     def _stream_completion(self):
         pass
@@ -798,17 +799,25 @@ class OpenAISession(LLMSession):
         ), "The OpenAI API does not support Guidance pattern controls! Please either switch to an endpoint that does, or don't use the `pattern` argument to `gen`."
         # assert not stop_regex, "The OpenAI API does not support Guidance stop_regex controls! Please either switch to an endpoint that does, or don't use the `stop_regex` argument to `gen`."
 
+        # Decide whether this call should bypass cache reads/writes.
+        not_caching = caching is False or (
+            caching is not True and not self.llm.caching
+        )
+
         # define the key for the cache
         cache_params = self._cache_params(args)
-        llm_cache = self.llm.cache
-        key = llm_cache.create_key(self.llm.llm_name, **cache_params)
+        llm_cache = None
+        key = None
+        if not not_caching:
+            llm_cache = self.llm.cache
+            key = llm_cache.create_key(self.llm.llm_name, **cache_params)
 
-        # allow streaming to use non-streaming cache (the reverse is not true)
-        if key not in llm_cache and stream:
-            cache_params["stream"] = False
-            key1 = llm_cache.create_key(self.llm.llm_name, **cache_params)
-            if key1 in llm_cache:
-                key = key1
+            # allow streaming to use non-streaming cache (the reverse is not true)
+            if key not in llm_cache and stream:
+                cache_params["stream"] = False
+                key1 = llm_cache.create_key(self.llm.llm_name, **cache_params)
+                if key1 in llm_cache:
+                    key = key1
 
         if Version(openai.version.VERSION) >= Version("1"):
             OpenAIRateLimitError = openai.RateLimitError
@@ -822,11 +831,7 @@ class OpenAISession(LLMSession):
             OpenAIAPIConnectionError = openai.error.APIConnectionError
 
         # check the cache
-        if (
-            key not in llm_cache
-            or caching is False
-            or (caching is not True and not self.llm.caching)
-        ):
+        if not_caching or key not in llm_cache:
 
             # ensure we don't exceed the rate limit
             while self.llm.count_calls() > self.llm.max_calls_per_min:
@@ -892,6 +897,8 @@ class OpenAISession(LLMSession):
 
             if stream:
                 return self.llm.stream_then_save(out, key, stop_regex, n)
+            if not_caching:
+                return out
             else:
                 llm_cache[key] = out
 

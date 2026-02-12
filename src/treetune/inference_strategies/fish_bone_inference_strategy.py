@@ -90,6 +90,8 @@ class FishBoneInferenceStrategy(InferenceStrategy):
 
         # Set the guidance LLM
         guidance.llm = self.guidance_llm_lazy.construct()
+        if self.no_cache and hasattr(guidance.llm, "caching"):
+            guidance.llm.caching = False
 
         self.node_expander.set_run_program(sem_run_program)
         self.answer_extractor.set_run_program(sem_run_program)
