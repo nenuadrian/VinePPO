@@ -102,14 +102,13 @@ export CXX=g++
 export CUDAHOSTCXX=g++
 
 CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet"
-APP_DIRECTORY="experiments/test"
+APP_DIRECTORY="experiments/vmpo_test_run"
+APP_EXPERIMENT_NAME="vmpo_test_run" 
 
 
-CONFIGSTR="configs/polIter_rho1bSft2_vmpo_GSM8K.jsonnet"
-APP_DIRECTORY="experiments/vmpo-test"
+export APP_TEMP_CKPT_DIR="~/vineppo_tmp/runA"
+CONFIGSTR="configs/polIter_rho1bSft2_vmpo_GSM8K.jsonnet,configs/trainers/temp_ckpt_dir.jsonnet"
 
-export APP_SEED="2746318213"
-# export WANDB_RUN_ID="<unique_wandb_run_id>" 
 
 NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 
