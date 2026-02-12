@@ -103,8 +103,11 @@ local sampling_temperature = 0.6;
 
         general_training_args+: {
             target_train_batch_size: 64,
-            per_device_train_batch_size: null,  // Will be auto computed
-            gradient_accumulation_steps: 1,
+            // Keep micro-batches modest so PPO/VMPO logprob/value recomputation
+            // does not OOM on single 40-48GB GPUs.
+            per_device_train_batch_size: 8,
+            per_device_eval_batch_size: 2,
+            gradient_accumulation_steps: null,  // Will be auto computed
 
             save_steps: 40,
             checkpoint_keep_steps: 40,

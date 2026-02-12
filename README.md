@@ -130,12 +130,13 @@ This setup was tested on 4x A100 80GB GPUs for Rho models and 8x H100 80GB GPUs 
 *PS: Refer to [`src/treetune/runtime/policy_iteration_runtime.py`](https://github.com/McGill-NLP/VinePPO/blob/f41ba0380619d588d80d63c4b6c90dbc5c717d1e/src/treetune/runtime/policy_iteration_runtime.py#L162) if you'd like to start reading the codebase.*
 
 ### Single GPU Training (Only for Rho models)
-Add this config `configs/trainers/devBz16.jsonnet` to the `$CONFIGSTR` variable in the script above:
+Add this config `configs/trainers/devBz8.jsonnet` to the `$CONFIGSTR` variable in the script above:
 ```bash
 CONFIGSTR="configs/<config_file>.jsonnet,\
-configs/trainers/devBz16.jsonnet"
+configs/trainers/devBz8.jsonnet"
 ```
-Note that this is not fully tested and you may need to adjust the batch size to fit your GPU memory.
+For 40-48GB GPUs, `devBz8` is typically safer than `devBz16`.  
+Note that single-GPU mode is not fully tested and you may still need to reduce batch sizes further.
 
 ### Running the experiments
 To run the experiments, you can use the following script:
