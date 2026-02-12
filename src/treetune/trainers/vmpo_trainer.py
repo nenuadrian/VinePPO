@@ -3,7 +3,6 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-import numpy as np
 import torch
 from accelerate.checkpointing import load_custom_state, save_custom_state
 from deepspeed import DeepSpeedEngine
@@ -167,6 +166,15 @@ class _PopArtState:
 
 @Trainer.register("vmpo")
 class VMPOTrainer(PPOTrainer):
+    @staticmethod
+    def _inverse_softplus(x: float) -> float:
+        # Numerically stable inverse of softplus for x > 0.
+        if x <= 0:
+            raise ValueError("inverse_softplus is only defined for positive inputs.")
+        if x > 20.0:
+            return x
+        return math.log(math.expm1(x))
+
     def __init__(self, params: JsonDict, **kwargs):
         params = dict(params)
 
@@ -188,30 +196,40 @@ class VMPOTrainer(PPOTrainer):
         self.vmpo_hparams = VMPOHParams(**merged_params)
 
         dual_device = self.distributed_state.device
+        self._dual_grad_accum_steps = max(
+            1,
+            int(getattr(self.args, "gradient_accumulation_steps", 1) or 1),
+        )
+        self._dual_grads_accumulating = False
+
+        def _init_dual_raw(target_value: float) -> float:
+            clamped_target = min(
+                max(float(target_value), self.vmpo_hparams.dual_min),
+                self.vmpo_hparams.dual_max,
+            )
+            pre_softplus = max(
+                clamped_target - self.vmpo_hparams.dual_min,
+                1e-12,
+            )
+            return self._inverse_softplus(pre_softplus)
+
         self.log_temperature = torch.nn.Parameter(
             torch.tensor(
-                np.log(
-                    max(
-                        self.vmpo_hparams.temperature_init,
-                        self.vmpo_hparams.dual_min,
-                    )
-                ),
+                _init_dual_raw(self.vmpo_hparams.temperature_init),
                 dtype=torch.float32,
                 device=dual_device,
             )
         )
         self.log_alpha_mu = torch.nn.Parameter(
             torch.tensor(
-                np.log(max(self.vmpo_hparams.alpha_mu_init, self.vmpo_hparams.dual_min)),
+                _init_dual_raw(self.vmpo_hparams.alpha_mu_init),
                 dtype=torch.float32,
                 device=dual_device,
             )
         )
         self.log_alpha_sigma = torch.nn.Parameter(
             torch.tensor(
-                np.log(
-                    max(self.vmpo_hparams.alpha_sigma_init, self.vmpo_hparams.dual_min)
-                ),
+                _init_dual_raw(self.vmpo_hparams.alpha_sigma_init),
                 dtype=torch.float32,
                 device=dual_device,
             )
@@ -248,6 +266,26 @@ class VMPOTrainer(PPOTrainer):
             min=self.vmpo_hparams.dual_min,
             max=self.vmpo_hparams.dual_max,
         )
+
+    def _begin_dual_accumulation_if_needed(self) -> None:
+        if self._dual_grads_accumulating:
+            return
+        self.temperature_optimizer.zero_grad(set_to_none=True)
+        self.alpha_mu_optimizer.zero_grad(set_to_none=True)
+        self.alpha_sigma_optimizer.zero_grad(set_to_none=True)
+        self._dual_grads_accumulating = True
+
+    def _finalize_dual_updates_if_boundary(self, *, is_grad_acc_boundary: bool) -> None:
+        if not is_grad_acc_boundary:
+            return
+        if self._dual_grads_accumulating:
+            self._sync_grads(
+                [self.log_temperature, self.log_alpha_mu, self.log_alpha_sigma]
+            )
+            self.temperature_optimizer.step()
+            self.alpha_mu_optimizer.step()
+            self.alpha_sigma_optimizer.step()
+        self._dual_grads_accumulating = False
 
     @staticmethod
     def _sync_grads(params):
@@ -486,6 +524,7 @@ class VMPOTrainer(PPOTrainer):
         avg_ratio = masked_mean(ratio, action_mask)
         approx_kl = 0.5 * masked_mean((logprobs - old_logprobs) ** 2, action_mask)
         policy_kl = masked_mean(old_logprobs - logprobs, action_mask)
+        is_grad_acc_boundary = actor.is_gradient_accumulation_boundary()
 
         if avg_ratio.item() > self.ppo_hparams.ratio_threshold:
             logger.warning(
@@ -531,6 +570,9 @@ class VMPOTrainer(PPOTrainer):
             }
             if "entropy" in outputs:
                 metrics["actor/logit_entropy"] = outputs["entropy"].detach()
+            self._finalize_dual_updates_if_boundary(
+                is_grad_acc_boundary=is_grad_acc_boundary
+            )
             return zero_loss, True, metrics, None
 
         flat_action_mask = action_mask.bool().reshape(-1)
@@ -559,6 +601,9 @@ class VMPOTrainer(PPOTrainer):
             }
             if "entropy" in outputs:
                 metrics["actor/logit_entropy"] = outputs["entropy"].detach()
+            self._finalize_dual_updates_if_boundary(
+                is_grad_acc_boundary=is_grad_acc_boundary
+            )
             return zero_loss, True, metrics, None
 
         if (
@@ -597,10 +642,9 @@ class VMPOTrainer(PPOTrainer):
             torch.logsumexp(selected_advantages.detach() / eta, dim=0) - log_count
         )
 
-        self.temperature_optimizer.zero_grad(set_to_none=True)
-        eta_dual_loss.backward()
-        self._sync_grads([self.log_temperature])
-        self.temperature_optimizer.step()
+        self._begin_dual_accumulation_if_needed()
+        dual_loss_scale = 1.0 / float(self._dual_grad_accum_steps)
+        (eta_dual_loss * dual_loss_scale).backward()
 
         with torch.no_grad():
             eta_detached = self._positive_dual(self.log_temperature.detach())
@@ -640,15 +684,11 @@ class VMPOTrainer(PPOTrainer):
             - policy_kl_sigma_selected.detach()
         )
 
-        self.alpha_mu_optimizer.zero_grad(set_to_none=True)
-        alpha_mu_dual_loss.backward()
-        self._sync_grads([self.log_alpha_mu])
-        self.alpha_mu_optimizer.step()
-
-        self.alpha_sigma_optimizer.zero_grad(set_to_none=True)
-        alpha_sigma_dual_loss.backward()
-        self._sync_grads([self.log_alpha_sigma])
-        self.alpha_sigma_optimizer.step()
+        (alpha_mu_dual_loss * dual_loss_scale).backward()
+        (alpha_sigma_dual_loss * dual_loss_scale).backward()
+        self._finalize_dual_updates_if_boundary(
+            is_grad_acc_boundary=is_grad_acc_boundary
+        )
 
         with torch.no_grad():
             alpha_mu_detached = self._positive_dual(self.log_alpha_mu.detach())

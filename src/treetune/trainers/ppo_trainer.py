@@ -810,6 +810,13 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 old_valid_values=valid_values,
                 returns=returns,
             )
+            if is_skipped:
+                # Keep actor/critic optimizer-step alignment under DeepSpeed
+                # while preventing critic updates for skipped policy batches.
+                critic_loss = critic_loss * 0.0
+                critic_metrics["critic/skipped_batch"] = torch.ones(
+                    (), device=critic_loss.device
+                )
             critic.backward(critic_loss)
             self._check_overflow(critic)
             critic.step()

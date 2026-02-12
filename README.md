@@ -108,21 +108,26 @@ export CXX=g++
 export CUDAHOSTCXX=g++
 NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 
-APP_EXPERIMENT_NAME="vmpo_test_run" 
-APP_DIRECTORY="experiments/$APP_EXPERIMENT_NAME"
-export APP_TEMP_CKPT_DIR="~/.cache/vineppo/$APP_EXPERIMENT_NAME$"
+
+APP_EXPERIMENT_NAME="ppo_qwen2p5_0p5bInstruct_GSM8K" 
+
+CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet,configs/trainers/temp_ckpt_dir.jsonnet"
+
+CONFIGSTR="configs/polIter_qwen2p5_0p5bInstruct_ppo_GSM8K.jsonnet,configs/trainers/temp_ckpt_dir.jsonnet"
 
 
-CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet"
-
-CONFIGSTR="configs/polIter_qwen2p5_0p5bInstruct_ppo_GSM8K.jsonnet"
-
+APP_EXPERIMENT_NAME="vmpo_qwen2p5_0p5bInstruct_GSM8K" 
 
 CONFIGSTR="configs/polIter_rho1bSft2_vmpo_GSM8K.jsonnet,configs/trainers/temp_ckpt_dir.jsonnet"
 
 CONFIGSTR="configs/polIter_qwen2p5_0p5bInstruct_vmpo_GSM8K.jsonnet,configs/trainers/temp_ckpt_dir.jsonnet"
 
 
+APP_DIRECTORY="experiments/$APP_EXPERIMENT_NAME"
+export APP_TEMP_CKPT_DIR="~/.cache/vineppo/$APP_EXPERIMENT_NAME"
+# Note: `configs/sft_*_for_*_eval.jsonnet` files are fragments merged into
+# `polIter_*` configs. Do not pass them directly as `--configs`; they do not
+# define a top-level runtime `type`.
 # Run the training
 deepspeed --no_local_rank --num_gpus=$NUM_GPUS  \
          src/treetune/main.py --configs "$CONFIGSTR" \

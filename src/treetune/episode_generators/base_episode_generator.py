@@ -18,6 +18,15 @@ from treetune.tokenization_utils.base_tokenizer import Tokenizer
 logger = get_logger(__name__)
 
 
+def _sanitize_token_id_list(token_ids: List[Optional[int]]) -> List[int]:
+    sanitized: List[int] = []
+    for tok_id in token_ids:
+        if tok_id is None:
+            continue
+        sanitized.append(int(tok_id))
+    return sanitized
+
+
 @dataclass
 class Episode:
     query_token_ids: List[int]
@@ -122,15 +131,31 @@ class EpisodeGenerator(Registrable):
             response_token_ids = episode["response_token_ids"]
             reward = episode["reward"]
 
+            safe_query_token_ids = _sanitize_token_id_list(query_token_ids)
+            safe_response_token_ids = _sanitize_token_id_list(response_token_ids)
+
+            if len(safe_query_token_ids) != len(query_token_ids):
+                logger.warning(
+                    "Episode %s contains %d null query token ids; skipping them for logging.",
+                    idx,
+                    len(query_token_ids) - len(safe_query_token_ids),
+                )
+            if len(safe_response_token_ids) != len(response_token_ids):
+                logger.warning(
+                    "Episode %s contains %d null response token ids; skipping them for logging.",
+                    idx,
+                    len(response_token_ids) - len(safe_response_token_ids),
+                )
+
             query_tokens = [
                 (
                     self.tokenizer.convert_ids_to_tokens(tok_id)
                     if tok_id >= 0
                     else str(tok_id)
                 )
-                for tok_id in query_token_ids
+                for tok_id in safe_query_token_ids
             ]
-            query = self.tokenizer.decode(query_token_ids)
+            query = self.tokenizer.decode(safe_query_token_ids)
 
             response_tokens = [
                 (
@@ -138,12 +163,12 @@ class EpisodeGenerator(Registrable):
                     if tok_id >= 0
                     else str(tok_id)
                 )
-                for tok_id in response_token_ids
+                for tok_id in safe_response_token_ids
             ]
-            response = self.tokenizer.decode(response_token_ids)
+            response = self.tokenizer.decode(safe_response_token_ids)
 
             advantages = episode.get("advantages")
-            instance_length = len(query_token_ids) + len(response_token_ids)
+            instance_length = len(safe_query_token_ids) + len(safe_response_token_ids)
 
             table.add_data(
                 idx,
