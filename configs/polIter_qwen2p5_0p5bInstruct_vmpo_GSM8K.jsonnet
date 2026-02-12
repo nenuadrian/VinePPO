@@ -9,6 +9,7 @@ local total_num_iterations = 650;
         // Override the task
         task: task,
         reward_function+: { math_task: $.episode_generator.task },
+        append_bos_to_query: false,
 
         initial_model_name_or_path: hf_model_name,
 

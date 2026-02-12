@@ -147,9 +147,19 @@ class EpisodeGeneratorWithRewardFunction(OnPolicyEpisodeGenerator, TreeEpisodeUt
         # just to be very explicit about them. `add_special_tokens=True` may not
         # always add BOS and EOS tokens.
         if self._should_append_bos_to_query():
+            if self.tokenizer.bos_token_id is None:
+                raise ValueError(
+                    "append_bos_to_query=True but tokenizer.bos_token_id is None. "
+                    "Set append_bos_to_query=false for this tokenizer."
+                )
             query_token_ids = [self.tokenizer.bos_token_id] + query_token_ids
 
         if not is_unfinished_response and self._should_append_eos_to_response():
+            if self.tokenizer.eos_token_id is None:
+                raise ValueError(
+                    "append_eos_to_response=True but tokenizer.eos_token_id is None. "
+                    "Set append_eos_to_response=false for this tokenizer."
+                )
             response_token_ids = response_token_ids + [self.tokenizer.eos_token_id]
 
         if return_offsets:

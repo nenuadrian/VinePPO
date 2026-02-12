@@ -1,4 +1,4 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 
 import torch
 
@@ -12,6 +12,24 @@ COLUMN_VALUES = "critic_values"
 class DataCollator(Registrable):
     def __call__(self, instances: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         raise NotImplementedError
+
+
+def _sanitize_token_ids(token_ids: Optional[List[Any]]) -> Tuple[List[int], List[int]]:
+    """
+    Remove null token ids and cast valid ids to ints.
+    Returns the sanitized ids and original indices that were removed.
+    """
+    sanitized: List[int] = []
+    removed_indices: List[int] = []
+    if token_ids is None:
+        return sanitized, removed_indices
+
+    for idx, tok_id in enumerate(token_ids):
+        if tok_id is None:
+            removed_indices.append(idx)
+            continue
+        sanitized.append(int(tok_id))
+    return sanitized, removed_indices
 
 
 class PPODataCollator:
@@ -102,8 +120,21 @@ class PPODataCollator:
             return shifted_logs
 
         for instance in data_instances:
-            query_token_ids = instance["query_token_ids"]
-            response_token_ids = instance["response_token_ids"]
+            query_token_ids, _ = _sanitize_token_ids(
+                instance["query_token_ids"]
+            )
+            response_token_ids, removed_response_indices = _sanitize_token_ids(
+                instance["response_token_ids"]
+            )
+
+            if len(query_token_ids) == 0:
+                raise ValueError(
+                    "Encountered an episode with empty query_token_ids after sanitization."
+                )
+            if len(response_token_ids) == 0:
+                raise ValueError(
+                    "Encountered an episode with empty response_token_ids after sanitization."
+                )
 
             # Create the input ids and attention mask
             input_ids = query_token_ids + response_token_ids
@@ -125,6 +156,23 @@ class PPODataCollator:
 
             if has_advantages:
                 advantages = instance["advantages"]
+                if advantages is None:
+                    raise ValueError(
+                        "Encountered an episode with `advantages=None` while "
+                        "advantages are required."
+                    )
+                if len(removed_response_indices) > 0:
+                    if len(advantages) != len(instance["response_token_ids"]):
+                        raise ValueError(
+                            "Cannot align advantages with response_token_ids because "
+                            "their lengths do not match before sanitization."
+                        )
+                    removed_indices = set(removed_response_indices)
+                    advantages = [
+                        adv
+                        for idx, adv in enumerate(advantages)
+                        if idx not in removed_indices
+                    ]
                 advantages = (
                     [0.0] * len(query_token_ids) + advantages + [0.0] * num_pad_at_end
                 )
@@ -263,9 +311,26 @@ class DPODataCollator:
             return shifted_logs
 
         for instance in data_instances:
-            query_token_ids = instance["query_token_ids"]
-            accept_response_token_ids = instance["accept_response_token_ids"]
-            reject_response_token_ids = instance["reject_response_token_ids"]
+            query_token_ids, _ = _sanitize_token_ids(instance["query_token_ids"])
+            accept_response_token_ids, _ = _sanitize_token_ids(
+                instance["accept_response_token_ids"]
+            )
+            reject_response_token_ids, _ = _sanitize_token_ids(
+                instance["reject_response_token_ids"]
+            )
+
+            if len(query_token_ids) == 0:
+                raise ValueError(
+                    "Encountered a DPO episode with empty query_token_ids after sanitization."
+                )
+            if len(accept_response_token_ids) == 0:
+                raise ValueError(
+                    "Encountered a DPO episode with empty accept_response_token_ids after sanitization."
+                )
+            if len(reject_response_token_ids) == 0:
+                raise ValueError(
+                    "Encountered a DPO episode with empty reject_response_token_ids after sanitization."
+                )
 
             # Create the input ids and attention mask
             accept_input_ids = query_token_ids + accept_response_token_ids

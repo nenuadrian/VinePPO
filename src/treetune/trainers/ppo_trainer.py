@@ -2472,8 +2472,47 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
 
     def _filter_episodes(self, episodes_dataset: Dataset) -> Dataset:
         """
-        Filter out episodes that are too long.
+        Sanitize tokenized episodes and filter invalid/too-long rows.
         """
+        with self.distributed_state.main_process_first():
+            episodes_dataset = episodes_dataset.map(
+                lambda ex: {
+                    "query_token_ids": [
+                        int(tok)
+                        for tok in (ex["query_token_ids"] or [])
+                        if tok is not None
+                    ],
+                    "response_token_ids": [
+                        int(tok)
+                        for tok in (ex["response_token_ids"] or [])
+                        if tok is not None
+                    ],
+                },
+                desc="Sanitizing token ids",
+            )
+
+        # Drop invalid episodes after sanitization.
+        orig_len = len(episodes_dataset)
+
+        def has_valid_tokens(example):
+            return (
+                len(example["query_token_ids"]) > 0
+                and len(example["response_token_ids"]) > 0
+            )
+
+        with self.distributed_state.main_process_first():
+            episodes_dataset = episodes_dataset.filter(
+                has_valid_tokens,
+                desc="Filtering invalid episodes",
+            )
+
+        dropped_for_invalid_tokens = orig_len - len(episodes_dataset)
+        if dropped_for_invalid_tokens > 0:
+            logger.warning(
+                "Dropped %d episodes with empty query/response token ids after sanitization.",
+                dropped_for_invalid_tokens,
+            )
+
         if self.args.max_seq_len is not None:
             max_seq_len = self.args.max_seq_len
             orig_len = len(episodes_dataset)
