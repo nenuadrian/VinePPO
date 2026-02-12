@@ -2,20 +2,21 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 # VinePPO: Unlocking RL Potential For LLM Reasoning Through Refined Credit Assignment
 > Amirhossein Kazemnejad*, Milad Aghajohari*, Eva Portelance, Alessandro Sordoni, Siva Reddy, Aaron Courville, Nicolas Le Roux
-- [Paper](#paper)
-- [Abstract](#abstract)
-- [Updates](#updates)
-- [Quick Start](#quick-start)
-  - [Installation](#installation)
-  - [Download the datasets](#download-the-datasets)
-  - [Create Experiment Script](#create-experiment-script)
-  - [Single GPU Training (Only for Rho models)](#single-gpu-training-only-for-rho-models)
-  - [Running the experiments](#running-the-experiments)
-- [Initial SFT Checkpoints](#initial-sft-checkpoints)
-- [Acknowledgement](#acknowledgement)
-- [Code Structure](#code-structure)
-  - [Important files](#important-files)
-- [Citation](#citation)
+- [VinePPO: Unlocking RL Potential For LLM Reasoning Through Refined Credit Assignment](#vineppo-unlocking-rl-potential-for-llm-reasoning-through-refined-credit-assignment)
+  - [Paper](#paper)
+  - [Abstract](#abstract)
+  - [Updates](#updates)
+  - [Quick Start](#quick-start)
+    - [Installation](#installation)
+    - [Download the datasets](#download-the-datasets)
+    - [Create Experiment Script](#create-experiment-script)
+    - [Single GPU Training (Only for Rho models)](#single-gpu-training-only-for-rho-models)
+    - [Running the experiments](#running-the-experiments)
+  - [Initial SFT Checkpoints](#initial-sft-checkpoints)
+  - [Acknowledgement](#acknowledgement)
+  - [Code Structure](#code-structure)
+    - [Important files](#important-files)
+  - [Citation](#citation)
 
 
 Code for reproducing the results in the VinePPO paper. This codebase also provides performant implementation (leveraging vLLM as inference engine*) of popular RL and RL-free baselines (such as PPO, DPO, and RestEM) for LLM reasoning.
@@ -97,11 +98,11 @@ We first specify the configuration file for the experiment, and then, we explain
 Once you have selected the configuration file, you can run the training and evaluation using the following script:
 ```bash
 
-CONFIGSTR="configs/<config_file>.jsonnet"
-APP_DIRECTORY="experiments/<path_to_output_dir>"
+CONFIGSTR="configs/polIter_rho1bSft2_vmpo_GSM8K.jsonnet"
+APP_DIRECTORY="experiments/vmpo-test"
 
 export APP_SEED="2746318213"
-export WANDB_RUN_ID="<unique_wandb_run_id>" # Optional
+# export WANDB_RUN_ID="<unique_wandb_run_id>" 
 
 NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 
