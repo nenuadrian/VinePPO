@@ -97,6 +97,9 @@ We first specify the configuration file for the experiment, and then, we explain
 
 Once you have selected the configuration file, you can run the training and evaluation using the following script:
 ```bash
+export CC=gcc
+export CXX=g++
+export CUDAHOSTCXX=g++
 
 CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet"
 APP_DIRECTORY="experiments/test"

@@ -264,6 +264,18 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
     def _has_critic_model(self):
         return self.critic_lazy is not None
 
+    def _get_inference_per_device_batch_size(self) -> int:
+        batch_size = self.args.per_device_eval_batch_size
+        if batch_size is None:
+            batch_size = self.args.per_device_train_batch_size
+
+        if batch_size is None or batch_size <= 0:
+            raise ValueError(
+                "per_device_eval_batch_size (or per_device_train_batch_size fallback) "
+                "must be a positive integer."
+            )
+        return batch_size
+
     def _compute_batch_size_and_steps(self):
         if self.args.target_train_batch_size is not None:
             if (
@@ -308,6 +320,10 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             // self.global_batch_size
         )
         logger.info(f"Per device batch size: {self.args.per_device_train_batch_size}")
+        logger.info(
+            "Per device inference/eval batch size: "
+            f"{self._get_inference_per_device_batch_size()}"
+        )
         logger.info(
             f"Gradient accumulation steps: {self.args.gradient_accumulation_steps}"
         )
@@ -1626,11 +1642,13 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         dataset: Dataset,
         column_name: str,
     ) -> Dataset:
+        inference_batch_size = self._get_inference_per_device_batch_size()
+
         # Create a distributed data loader such that the order of
         # episodes is preserved when batched are distributed across multiple processes.
         data_loader = prepare_data_loader_for_inference(
             dataset,
-            per_device_batch_size=self.args.per_device_train_batch_size,
+            per_device_batch_size=inference_batch_size,
             data_loader_kwargs={
                 "collate_fn": PPODataCollator(),
                 "num_workers": self.args.dataloader_num_workers,
@@ -1652,10 +1670,10 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 assert torch.all(inputs["attention_mask"][:, 0] == 1)
                 assert (
                     inputs["input_ids"].shape[0]
-                    == self.args.per_device_train_batch_size
+                    == inference_batch_size
                 ), (
                     f"We expect on all processes to have the same batch size of "
-                    f"{self.args.per_device_train_batch_size}."
+                    f"{inference_batch_size}."
                 )
 
                 inputs = {k: v.to(model_engine.device) for k, v in inputs.items()}
@@ -1705,11 +1723,13 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
         dataset: Dataset,
         column_name: str,
     ) -> Dataset:
+        inference_batch_size = self._get_inference_per_device_batch_size()
+
         # Create a distributed data loader such that the order of
         # episodes is preserved when distributed across multiple processes.
         data_loader = prepare_data_loader_for_inference(
             dataset,
-            per_device_batch_size=self.args.per_device_train_batch_size,
+            per_device_batch_size=inference_batch_size,
             data_loader_kwargs={
                 "collate_fn": PPODataCollator(),
                 "num_workers": self.args.dataloader_num_workers,
@@ -1731,10 +1751,10 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 assert torch.all(inputs["attention_mask"][:, 0] == 1)
                 assert (
                     inputs["input_ids"].shape[0]
-                    == self.args.per_device_train_batch_size
+                    == inference_batch_size
                 ), (
                     f"We expect on all processes to have the same batch size of "
-                    f"{self.args.per_device_train_batch_size}."
+                    f"{inference_batch_size}."
                 )
 
                 inputs = {k: v.to(model_engine.device) for k, v in inputs.items()}
@@ -1808,23 +1828,25 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             use_cache=False,
         )
 
-        logits = outputs.logits.float()  # Shape: (batch_size, max_seq_len, vocab_size)
-        logits /= self.ppo_hparams.temperature
+        logits = outputs.logits  # Shape: (batch_size, max_seq_len, vocab_size)
+        if self.ppo_hparams.temperature != 1.0:
+            logits = logits / self.ppo_hparams.temperature
 
         # Shift so that tokens < n predict n
         # noinspection DuplicatedCode
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = labels[..., 1:].contiguous()
-        shift_label_mask = (shift_labels != -100).to(shift_logits.dtype)
 
         # Make sure all label indices are valid. i.e. convert -100 to 0
-        shift_labels[shift_labels == -100] = 0
+        shift_labels = shift_labels.masked_fill(shift_labels == -100, 0)
 
-        log_probs = shift_logits.log_softmax(-1)
-        per_token_log_probs = torch.gather(
-            log_probs, dim=2, index=shift_labels.unsqueeze(2)
-        )
-        per_token_log_probs = per_token_log_probs.squeeze(2)
+        # Compute token log-probs without materializing full log_softmax(logits).
+        selected_logits = torch.gather(
+            shift_logits, dim=2, index=shift_labels.unsqueeze(2)
+        ).squeeze(2)
+        log_normalizers = torch.logsumexp(shift_logits, dim=-1)
+        shift_label_mask = (labels[..., 1:] != -100).to(torch.float32)
+        per_token_log_probs = selected_logits.float() - log_normalizers.float()
 
         # Multiply the log probs by the label mask to ignore the padding labels
         per_token_log_probs = per_token_log_probs * shift_label_mask
@@ -1839,7 +1861,7 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
                 output["entropy"] = mean_entropy
 
         if return_logits:
-            output["logits"] = logits
+            output["logits"] = logits.float()
 
         if return_sequence_logp:
             sequence_log_probs = per_token_log_probs.sum(dim=-1)
