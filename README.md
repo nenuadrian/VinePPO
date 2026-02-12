@@ -82,6 +82,12 @@ We first specify the configuration file for the experiment, and then, we explain
 - `configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet`
 - `configs/polIter_deepseekSft2_ppo_MATH.jsonnet`
 - `configs/polIter_deepseekSft2_ppo_GSM8K.jsonnet`
+- `configs/polIter_qwen2p5_0p5bInstruct_ppo_GSM8K.jsonnet`
+
+**VMPO Experiments**
+- `configs/polIter_rho1bSft2_vmpo_MATH.jsonnet`
+- `configs/polIter_rho1bSft2_vmpo_GSM8K.jsonnet`
+- `configs/polIter_qwen2p5_0p5bInstruct_vmpo_GSM8K.jsonnet`
 
 **DPO Experiments**
 - `configs/polIter_rho1bSft2_dpo_positive_MATH.jsonnet`
@@ -100,17 +106,22 @@ Once you have selected the configuration file, you can run the training and eval
 export CC=gcc
 export CXX=g++
 export CUDAHOSTCXX=g++
+NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+
+APP_EXPERIMENT_NAME="vmpo_test_run" 
+APP_DIRECTORY="experiments/$APP_EXPERIMENT_NAME"
+export APP_TEMP_CKPT_DIR="~/.cache/vineppo/$APP_EXPERIMENT_NAME$"
+
 
 CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet"
-APP_DIRECTORY="experiments/vmpo_test_run"
-APP_EXPERIMENT_NAME="vmpo_test_run" 
+
+CONFIGSTR="configs/polIter_qwen2p5_0p5bInstruct_ppo_GSM8K.jsonnet"
 
 
-export APP_TEMP_CKPT_DIR="~/vineppo_tmp/runA"
 CONFIGSTR="configs/polIter_rho1bSft2_vmpo_GSM8K.jsonnet,configs/trainers/temp_ckpt_dir.jsonnet"
 
+CONFIGSTR="configs/polIter_qwen2p5_0p5bInstruct_vmpo_GSM8K.jsonnet,configs/trainers/temp_ckpt_dir.jsonnet"
 
-NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
 
 # Run the training
 deepspeed --no_local_rank --num_gpus=$NUM_GPUS  \
