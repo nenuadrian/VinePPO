@@ -98,6 +98,10 @@ We first specify the configuration file for the experiment, and then, we explain
 Once you have selected the configuration file, you can run the training and evaluation using the following script:
 ```bash
 
+CONFIGSTR="configs/polIter_rho1bSft2_ppo_GSM8K.jsonnet"
+APP_DIRECTORY="experiments/test"
+
+
 CONFIGSTR="configs/polIter_rho1bSft2_vmpo_GSM8K.jsonnet"
 APP_DIRECTORY="experiments/vmpo-test"
 
