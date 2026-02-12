@@ -27,7 +27,18 @@ class VMPOHParams(PPOHParams):
     temperature_init: float = 1.0
     temperature_lr: float = 1e-4
 
-    # VMPO trust region dual
+    # VMPO trust region dual (decoupled analogue for LLMs)
+    # alpha_mu constrains average log-prob shift
+    epsilon_alpha_mu: Optional[float] = None
+    alpha_mu_init: Optional[float] = None
+    alpha_mu_lr: Optional[float] = None
+
+    # alpha_sigma constrains dispersion of log-prob shift
+    epsilon_alpha_sigma: Optional[float] = None
+    alpha_sigma_init: Optional[float] = None
+    alpha_sigma_lr: Optional[float] = None
+
+    # Backward-compat aliases (single-alpha VMPO)
     epsilon_alpha_kl: float = 0.01
     alpha_init: float = 1.0
     alpha_lr: float = 1e-4
@@ -38,17 +49,42 @@ class VMPOHParams(PPOHParams):
     clip_advantages_min: Optional[float] = None
     clip_advantages_max: Optional[float] = None
 
+    # LLM critic normalization (PopArt)
+    use_popart: bool = True
+    popart_beta: float = 3e-4
+    popart_eps: float = 1e-4
+    popart_min_sigma: float = 1e-4
+
     def __post_init__(self):
         super().__post_init__()
         assert 0 < self.topk_fraction <= 1.0, "topk_fraction must be in (0, 1]."
         assert self.epsilon_eta > 0, "epsilon_eta must be positive."
-        assert self.epsilon_alpha_kl > 0, "epsilon_alpha_kl must be positive."
+        if self.epsilon_alpha_mu is None:
+            self.epsilon_alpha_mu = self.epsilon_alpha_kl
+        if self.epsilon_alpha_sigma is None:
+            self.epsilon_alpha_sigma = self.epsilon_alpha_kl
+        if self.alpha_mu_init is None:
+            self.alpha_mu_init = self.alpha_init
+        if self.alpha_sigma_init is None:
+            self.alpha_sigma_init = self.alpha_init
+        if self.alpha_mu_lr is None:
+            self.alpha_mu_lr = self.alpha_lr
+        if self.alpha_sigma_lr is None:
+            self.alpha_sigma_lr = self.alpha_lr
+
+        assert self.epsilon_alpha_mu > 0, "epsilon_alpha_mu must be positive."
+        assert self.epsilon_alpha_sigma > 0, "epsilon_alpha_sigma must be positive."
         assert self.temperature_init > 0, "temperature_init must be positive."
-        assert self.alpha_init > 0, "alpha_init must be positive."
+        assert self.alpha_mu_init > 0, "alpha_mu_init must be positive."
+        assert self.alpha_sigma_init > 0, "alpha_sigma_init must be positive."
         assert self.temperature_lr > 0, "temperature_lr must be positive."
-        assert self.alpha_lr > 0, "alpha_lr must be positive."
+        assert self.alpha_mu_lr > 0, "alpha_mu_lr must be positive."
+        assert self.alpha_sigma_lr > 0, "alpha_sigma_lr must be positive."
         assert self.dual_min > 0, "dual_min must be positive."
         assert self.dual_max > self.dual_min, "dual_max must be > dual_min."
+        assert 0 < self.popart_beta <= 1.0, "popart_beta must be in (0, 1]."
+        assert self.popart_eps > 0, "popart_eps must be positive."
+        assert self.popart_min_sigma > 0, "popart_min_sigma must be positive."
 
 
 class _VMPODualState:
@@ -60,7 +96,10 @@ class _VMPODualState:
             "log_temperature": float(
                 self._trainer.log_temperature.detach().cpu().item()
             ),
-            "log_alpha_kl": float(self._trainer.log_alpha_kl.detach().cpu().item()),
+            "log_alpha_mu": float(self._trainer.log_alpha_mu.detach().cpu().item()),
+            "log_alpha_sigma": float(
+                self._trainer.log_alpha_sigma.detach().cpu().item()
+            ),
         }
 
     def load_state_dict(self, state_dict: Dict[str, Any]):
@@ -69,11 +108,61 @@ class _VMPODualState:
             device=self._trainer.log_temperature.device,
             dtype=self._trainer.log_temperature.dtype,
         )
-        self._trainer.log_alpha_kl.data = torch.tensor(
-            state_dict["log_alpha_kl"],
-            device=self._trainer.log_alpha_kl.device,
-            dtype=self._trainer.log_alpha_kl.dtype,
+        # Backward compatibility with the previous single-alpha checkpoint.
+        if "log_alpha_mu" in state_dict and "log_alpha_sigma" in state_dict:
+            log_alpha_mu = state_dict["log_alpha_mu"]
+            log_alpha_sigma = state_dict["log_alpha_sigma"]
+        elif "log_alpha_kl" in state_dict:
+            log_alpha_mu = state_dict["log_alpha_kl"]
+            log_alpha_sigma = state_dict["log_alpha_kl"]
+        else:
+            raise KeyError(
+                "Could not find alpha dual values in checkpoint state dict."
+            )
+
+        self._trainer.log_alpha_mu.data = torch.tensor(
+            log_alpha_mu,
+            device=self._trainer.log_alpha_mu.device,
+            dtype=self._trainer.log_alpha_mu.dtype,
         )
+        self._trainer.log_alpha_sigma.data = torch.tensor(
+            log_alpha_sigma,
+            device=self._trainer.log_alpha_sigma.device,
+            dtype=self._trainer.log_alpha_sigma.dtype,
+        )
+
+
+class _PopArtState:
+    def __init__(self, trainer: "VMPOTrainer"):
+        self._trainer = trainer
+
+    def state_dict(self) -> Dict[str, float]:
+        return {
+            "mu": float(self._trainer.popart_mu.detach().cpu().item()),
+            "nu": float(self._trainer.popart_nu.detach().cpu().item()),
+            "sigma": float(self._trainer.popart_sigma.detach().cpu().item()),
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]):
+        self._trainer.popart_mu.copy_(torch.tensor(
+            state_dict["mu"],
+            device=self._trainer.popart_mu.device,
+            dtype=self._trainer.popart_mu.dtype,
+        ))
+        self._trainer.popart_nu.copy_(torch.tensor(
+            state_dict["nu"],
+            device=self._trainer.popart_nu.device,
+            dtype=self._trainer.popart_nu.dtype,
+        ))
+        sigma = max(
+            float(state_dict["sigma"]),
+            self._trainer.vmpo_hparams.popart_min_sigma,
+        )
+        self._trainer.popart_sigma.copy_(torch.tensor(
+            sigma,
+            device=self._trainer.popart_sigma.device,
+            dtype=self._trainer.popart_sigma.dtype,
+        ))
 
 
 @Trainer.register("vmpo")
@@ -111,9 +200,18 @@ class VMPOTrainer(PPOTrainer):
                 device=dual_device,
             )
         )
-        self.log_alpha_kl = torch.nn.Parameter(
+        self.log_alpha_mu = torch.nn.Parameter(
             torch.tensor(
-                np.log(max(self.vmpo_hparams.alpha_init, self.vmpo_hparams.dual_min)),
+                np.log(max(self.vmpo_hparams.alpha_mu_init, self.vmpo_hparams.dual_min)),
+                dtype=torch.float32,
+                device=dual_device,
+            )
+        )
+        self.log_alpha_sigma = torch.nn.Parameter(
+            torch.tensor(
+                np.log(
+                    max(self.vmpo_hparams.alpha_sigma_init, self.vmpo_hparams.dual_min)
+                ),
                 dtype=torch.float32,
                 device=dual_device,
             )
@@ -124,12 +222,25 @@ class VMPOTrainer(PPOTrainer):
             lr=self.vmpo_hparams.temperature_lr,
             eps=1e-5,
         )
-        self.alpha_optimizer = torch.optim.Adam(
-            [self.log_alpha_kl],
-            lr=self.vmpo_hparams.alpha_lr,
+        self.alpha_mu_optimizer = torch.optim.Adam(
+            [self.log_alpha_mu],
+            lr=self.vmpo_hparams.alpha_mu_lr,
+            eps=1e-5,
+        )
+        self.alpha_sigma_optimizer = torch.optim.Adam(
+            [self.log_alpha_sigma],
+            lr=self.vmpo_hparams.alpha_sigma_lr,
             eps=1e-5,
         )
         self._vmpo_dual_state = _VMPODualState(self)
+
+        self.popart_mu = torch.tensor(0.0, dtype=torch.float32, device=dual_device)
+        self.popart_nu = torch.tensor(1.0, dtype=torch.float32, device=dual_device)
+        self.popart_sigma = torch.tensor(
+            1.0, dtype=torch.float32, device=dual_device
+        )
+        self._popart_state = _PopArtState(self)
+        self._has_logged_missing_value_head = False
 
     def _positive_dual(self, dual_logvar: torch.Tensor) -> torch.Tensor:
         return torch.clamp(
@@ -149,6 +260,202 @@ class VMPOTrainer(PPOTrainer):
                 continue
             dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
             p.grad /= world_size
+
+    def _find_value_head(self, critic: DeepSpeedEngine) -> Optional[torch.nn.Linear]:
+        model = critic.module if isinstance(critic, DeepSpeedEngine) else critic
+
+        candidate_names = ["value_head", "reward_head", "v_head", "score"]
+        for attr_name in candidate_names:
+            module = getattr(model, attr_name, None)
+            if isinstance(module, torch.nn.Linear) and module.out_features == 1:
+                return module
+
+        for name, module in model.named_modules():
+            if name.endswith("value_head") and isinstance(module, torch.nn.Linear):
+                if module.out_features == 1:
+                    return module
+
+        return None
+
+    def _popart_normalize(self, values: torch.Tensor) -> torch.Tensor:
+        sigma = torch.clamp(
+            self.popart_sigma,
+            min=self.vmpo_hparams.popart_min_sigma,
+        )
+        return (values - self.popart_mu) / sigma
+
+    def _popart_denormalize(self, normalized_values: torch.Tensor) -> torch.Tensor:
+        sigma = torch.clamp(
+            self.popart_sigma,
+            min=self.vmpo_hparams.popart_min_sigma,
+        )
+        return normalized_values * sigma + self.popart_mu
+
+    def _compute_global_mean_sq(self, values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if values.numel() == 0:
+            mean = torch.tensor(0.0, dtype=torch.float32, device=self.popart_mu.device)
+            sq_mean = torch.tensor(1.0, dtype=torch.float32, device=self.popart_mu.device)
+            return mean, sq_mean
+
+        values = values.to(torch.float32)
+        sum_val = values.sum()
+        sq_sum_val = (values * values).sum()
+        count = torch.tensor(float(values.numel()), device=values.device, dtype=torch.float32)
+
+        if dist.is_initialized():
+            stats = torch.stack([sum_val, sq_sum_val, count])
+            dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+            global_count = torch.clamp(stats[2], min=1.0)
+            mean = stats[0] / global_count
+            sq_mean = stats[1] / global_count
+        else:
+            mean = sum_val / count
+            sq_mean = sq_sum_val / count
+
+        return mean.detach(), sq_mean.detach()
+
+    def _update_popart_stats_and_rescale_head(
+        self,
+        critic: DeepSpeedEngine,
+        returns: torch.Tensor,
+        action_mask: torch.Tensor,
+    ):
+        if not self.vmpo_hparams.use_popart:
+            return
+
+        valid_returns = returns[action_mask.bool()]
+        if valid_returns.numel() == 0:
+            return
+
+        old_mu = self.popart_mu.detach().clone()
+        old_sigma = torch.clamp(
+            self.popart_sigma.detach().clone(),
+            min=self.vmpo_hparams.popart_min_sigma,
+        )
+
+        batch_mean, batch_sq_mean = self._compute_global_mean_sq(valid_returns)
+        beta = self.vmpo_hparams.popart_beta
+
+        new_mu = (1.0 - beta) * old_mu + beta * batch_mean
+        new_nu = (1.0 - beta) * self.popart_nu.detach() + beta * batch_sq_mean
+        new_var = torch.clamp(
+            new_nu - new_mu.square(),
+            min=self.vmpo_hparams.popart_eps,
+        )
+        new_sigma = torch.clamp(
+            torch.sqrt(new_var),
+            min=self.vmpo_hparams.popart_min_sigma,
+        )
+
+        value_head = self._find_value_head(critic)
+        if value_head is None:
+            if not self._has_logged_missing_value_head:
+                logger.warning(
+                    "Could not find critic value head for PopArt rescaling. "
+                    "Falling back to value-target normalization only."
+                )
+                self._has_logged_missing_value_head = True
+        else:
+            with torch.no_grad():
+                scale = old_sigma / new_sigma
+                value_head.weight.mul_(scale)
+                value_head.bias.mul_(scale)
+                value_head.bias.add_((old_mu - new_mu) / new_sigma)
+
+        self.popart_mu.copy_(new_mu.detach())
+        self.popart_nu.copy_(new_nu.detach())
+        self.popart_sigma.copy_(new_sigma.detach())
+
+    def _forward_pass_critic(
+        self,
+        model_engine: DeepSpeedEngine,
+        inputs: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        output = super()._forward_pass_critic(model_engine, inputs)
+
+        if not self.vmpo_hparams.use_popart:
+            return output
+
+        normalized_values = output["values"]
+        values = self._popart_denormalize(normalized_values)
+        output["normalized_values"] = normalized_values
+        output["values"] = values
+        return output
+
+    def _compute_critics_loss(
+        self,
+        critic: DeepSpeedEngine,
+        model_inputs: Dict[str, torch.Tensor],
+        shifted_labels_mask: torch.LongTensor,
+        old_valid_values: torch.FloatTensor,
+        returns: torch.FloatTensor,
+    ) -> Tuple[torch.FloatTensor, Dict[str, torch.Tensor]]:
+        action_mask = shifted_labels_mask
+
+        if self.vmpo_hparams.use_popart:
+            with torch.no_grad():
+                self._update_popart_stats_and_rescale_head(critic, returns, action_mask)
+
+        if "labels" in model_inputs:
+            del model_inputs["labels"]
+        outputs = self._forward_pass_critic(critic, model_inputs)
+
+        valid_values = outputs["values"][:, :-1]
+
+        assert valid_values.shape == old_valid_values.shape
+        assert action_mask.shape == valid_values.shape
+
+        if self.vmpo_hparams.use_popart and "normalized_values" in outputs:
+            valid_values_hat = outputs["normalized_values"][:, :-1]
+            returns_hat = self._popart_normalize(returns)
+            old_values_hat = self._popart_normalize(old_valid_values)
+            value_clip_range_hat = (
+                self.ppo_hparams.cliprange_value
+                / torch.clamp(
+                    self.popart_sigma,
+                    min=self.vmpo_hparams.popart_min_sigma,
+                )
+            )
+            values_hat_clipped = torch.clamp(
+                valid_values_hat,
+                old_values_hat - value_clip_range_hat,
+                old_values_hat + value_clip_range_hat,
+            )
+            vf_losses1 = (valid_values_hat - returns_hat) ** 2
+            vf_losses2 = (values_hat_clipped - returns_hat) ** 2
+            mse_metric = masked_mean((valid_values - returns) ** 2, action_mask)
+            mse_norm_metric = masked_mean(vf_losses1, action_mask)
+        else:
+            values_clipped = torch.clamp(
+                valid_values,
+                old_valid_values - self.ppo_hparams.cliprange_value,
+                old_valid_values + self.ppo_hparams.cliprange_value,
+            )
+            vf_losses1 = (valid_values - returns) ** 2
+            vf_losses2 = (values_clipped - returns) ** 2
+            mse_metric = masked_mean(vf_losses1, action_mask)
+            mse_norm_metric = None
+
+        vf_losses = torch.max(vf_losses1, vf_losses2)
+        vf_loss = 0.5 * masked_mean(vf_losses, action_mask)
+
+        vf_clip_frac = masked_mean(
+            torch.gt(vf_losses2, vf_losses1).float(),
+            action_mask,
+        )
+
+        metrics = {
+            "critic/value": masked_mean(valid_values, action_mask).detach(),
+            "critic/mse": mse_metric.detach(),
+            "critic/clip_frac": vf_clip_frac.detach(),
+        }
+
+        if mse_norm_metric is not None:
+            metrics["critic/mse_normalized"] = mse_norm_metric.detach()
+            metrics["critic/popart_mu"] = self.popart_mu.detach().clone()
+            metrics["critic/popart_sigma"] = self.popart_sigma.detach().clone()
+
+        return vf_loss, metrics
 
     def _compute_actor_loss(
         self,
@@ -192,19 +499,28 @@ class VMPOTrainer(PPOTrainer):
                 "actor/clip_frac": zero,
                 "actor/ratio": avg_ratio.detach(),
                 "actor/vmpo_weighted_nll": zero,
-                "actor/vmpo_policy_kl_selected": zero,
-                "actor/vmpo_policy_kl_all": zero,
+                "actor/vmpo_policy_kl_mu_selected": zero,
+                "actor/vmpo_policy_kl_mu_all": zero,
+                "actor/vmpo_policy_kl_sigma_selected": zero,
+                "actor/vmpo_policy_kl_sigma_all": zero,
                 "actor/vmpo_dual_eta_loss": zero,
-                "actor/vmpo_dual_alpha_loss": zero,
+                "actor/vmpo_dual_alpha_mu_loss": zero,
+                "actor/vmpo_dual_alpha_sigma_loss": zero,
                 "vmpo/temperature": zero,
-                "vmpo/alpha_kl": zero,
+                "vmpo/alpha_mu": zero,
+                "vmpo/alpha_sigma": zero,
                 "vmpo/epsilon_eta": torch.tensor(
                     self.vmpo_hparams.epsilon_eta,
                     device=logprobs.device,
                     dtype=logprobs.dtype,
                 ),
-                "vmpo/epsilon_alpha_kl": torch.tensor(
-                    self.vmpo_hparams.epsilon_alpha_kl,
+                "vmpo/epsilon_alpha_mu": torch.tensor(
+                    self.vmpo_hparams.epsilon_alpha_mu,
+                    device=logprobs.device,
+                    dtype=logprobs.dtype,
+                ),
+                "vmpo/epsilon_alpha_sigma": torch.tensor(
+                    self.vmpo_hparams.epsilon_alpha_sigma,
                     device=logprobs.device,
                     dtype=logprobs.dtype,
                 ),
@@ -232,9 +548,11 @@ class VMPOTrainer(PPOTrainer):
                 "actor/ratio": empty_metric,
                 "actor/vmpo_weighted_nll": empty_metric,
                 "actor/vmpo_dual_eta_loss": empty_metric,
-                "actor/vmpo_dual_alpha_loss": empty_metric,
+                "actor/vmpo_dual_alpha_mu_loss": empty_metric,
+                "actor/vmpo_dual_alpha_sigma_loss": empty_metric,
                 "vmpo/temperature": empty_metric,
-                "vmpo/alpha_kl": empty_metric,
+                "vmpo/alpha_mu": empty_metric,
+                "vmpo/alpha_sigma": empty_metric,
                 "vmpo/selected_fraction": empty_metric,
                 "vmpo/selected_adv_threshold": empty_metric,
                 "vmpo/effective_sample_size": empty_metric,
@@ -295,25 +613,52 @@ class VMPOTrainer(PPOTrainer):
 
         weighted_nll = -(weights.detach() * selected_logprobs).sum()
 
-        policy_kl_all = (flat_old_logprobs.detach() - flat_logprobs).mean()
-        policy_kl_selected = (
-            selected_old_logprobs.detach() - selected_logprobs
-        ).mean()
+        delta_logprob_all = flat_logprobs - flat_old_logprobs.detach()
+        delta_logprob_selected = selected_logprobs - selected_old_logprobs.detach()
 
-        alpha_kl = self._positive_dual(self.log_alpha_kl)
-        alpha_dual_loss = alpha_kl * (
-            self.vmpo_hparams.epsilon_alpha_kl - policy_kl_selected.detach()
+        # LLM analogue of decoupled KL terms:
+        # - mu-like term: first moment of log-prob shift (on-policy KL proxy)
+        # - sigma-like term: dispersion of log-prob shift
+        policy_kl_mu_all = (-delta_logprob_all).mean()
+        policy_kl_mu_selected = (
+            -delta_logprob_selected
+        ).mean()
+        centered_delta_selected = (
+            delta_logprob_selected - delta_logprob_selected.mean()
+        )
+        centered_delta_all = delta_logprob_all - delta_logprob_all.mean()
+        policy_kl_sigma_selected = 0.5 * centered_delta_selected.pow(2).mean()
+        policy_kl_sigma_all = 0.5 * centered_delta_all.pow(2).mean()
+
+        alpha_mu = self._positive_dual(self.log_alpha_mu)
+        alpha_sigma = self._positive_dual(self.log_alpha_sigma)
+        alpha_mu_dual_loss = alpha_mu * (
+            self.vmpo_hparams.epsilon_alpha_mu - policy_kl_mu_selected.detach()
+        )
+        alpha_sigma_dual_loss = alpha_sigma * (
+            self.vmpo_hparams.epsilon_alpha_sigma
+            - policy_kl_sigma_selected.detach()
         )
 
-        self.alpha_optimizer.zero_grad(set_to_none=True)
-        alpha_dual_loss.backward()
-        self._sync_grads([self.log_alpha_kl])
-        self.alpha_optimizer.step()
+        self.alpha_mu_optimizer.zero_grad(set_to_none=True)
+        alpha_mu_dual_loss.backward()
+        self._sync_grads([self.log_alpha_mu])
+        self.alpha_mu_optimizer.step()
+
+        self.alpha_sigma_optimizer.zero_grad(set_to_none=True)
+        alpha_sigma_dual_loss.backward()
+        self._sync_grads([self.log_alpha_sigma])
+        self.alpha_sigma_optimizer.step()
 
         with torch.no_grad():
-            alpha_kl_detached = self._positive_dual(self.log_alpha_kl.detach())
+            alpha_mu_detached = self._positive_dual(self.log_alpha_mu.detach())
+            alpha_sigma_detached = self._positive_dual(self.log_alpha_sigma.detach())
 
-        pg_loss = weighted_nll + alpha_kl_detached * policy_kl_selected
+        pg_loss = (
+            weighted_nll
+            + alpha_mu_detached * policy_kl_mu_selected
+            + alpha_sigma_detached * policy_kl_sigma_selected
+        ).mean()
 
         if self.ppo_hparams.kl_penalty_loss_type is not None:
             assert ref_logprobs is not None
@@ -341,19 +686,28 @@ class VMPOTrainer(PPOTrainer):
             "actor/clip_frac": torch.zeros((), device=logprobs.device),
             "actor/ratio": avg_ratio.detach(),
             "actor/vmpo_weighted_nll": weighted_nll.detach(),
-            "actor/vmpo_policy_kl_selected": policy_kl_selected.detach(),
-            "actor/vmpo_policy_kl_all": policy_kl_all.detach(),
+            "actor/vmpo_policy_kl_mu_selected": policy_kl_mu_selected.detach(),
+            "actor/vmpo_policy_kl_mu_all": policy_kl_mu_all.detach(),
+            "actor/vmpo_policy_kl_sigma_selected": policy_kl_sigma_selected.detach(),
+            "actor/vmpo_policy_kl_sigma_all": policy_kl_sigma_all.detach(),
             "actor/vmpo_dual_eta_loss": eta_dual_loss.detach(),
-            "actor/vmpo_dual_alpha_loss": alpha_dual_loss.detach(),
+            "actor/vmpo_dual_alpha_mu_loss": alpha_mu_dual_loss.detach(),
+            "actor/vmpo_dual_alpha_sigma_loss": alpha_sigma_dual_loss.detach(),
             "vmpo/temperature": eta_detached.detach(),
-            "vmpo/alpha_kl": alpha_kl_detached.detach(),
+            "vmpo/alpha_mu": alpha_mu_detached.detach(),
+            "vmpo/alpha_sigma": alpha_sigma_detached.detach(),
             "vmpo/epsilon_eta": torch.tensor(
                 self.vmpo_hparams.epsilon_eta,
                 device=logprobs.device,
                 dtype=logprobs.dtype,
             ),
-            "vmpo/epsilon_alpha_kl": torch.tensor(
-                self.vmpo_hparams.epsilon_alpha_kl,
+            "vmpo/epsilon_alpha_mu": torch.tensor(
+                self.vmpo_hparams.epsilon_alpha_mu,
+                device=logprobs.device,
+                dtype=logprobs.dtype,
+            ),
+            "vmpo/epsilon_alpha_sigma": torch.tensor(
+                self.vmpo_hparams.epsilon_alpha_sigma,
                 device=logprobs.device,
                 dtype=logprobs.dtype,
             ),
@@ -379,16 +733,29 @@ class VMPOTrainer(PPOTrainer):
         if self._is_main_process():
             save_custom_state(self._vmpo_dual_state, checkpoint_path, index=20)
             save_custom_state(self.temperature_optimizer, checkpoint_path, index=21)
-            save_custom_state(self.alpha_optimizer, checkpoint_path, index=22)
+            save_custom_state(self.alpha_mu_optimizer, checkpoint_path, index=22)
+            save_custom_state(self.alpha_sigma_optimizer, checkpoint_path, index=23)
+            save_custom_state(self._popart_state, checkpoint_path, index=30)
 
     def _load_training_state(self, checkpoint_path: Path) -> None:
         super()._load_training_state(checkpoint_path)
 
-        # Backward compatibility: old PPO checkpoints don't include VMPO dual states.
+        # Backward compatibility: older checkpoints might not include all VMPO states.
         try:
             load_custom_state(self._vmpo_dual_state, checkpoint_path, index=20)
             load_custom_state(self.temperature_optimizer, checkpoint_path, index=21)
-            load_custom_state(self.alpha_optimizer, checkpoint_path, index=22)
+            load_custom_state(self.alpha_mu_optimizer, checkpoint_path, index=22)
+            try:
+                load_custom_state(self.alpha_sigma_optimizer, checkpoint_path, index=23)
+            except Exception:
+                # Old single-alpha optimizer state.
+                load_custom_state(self.alpha_sigma_optimizer, checkpoint_path, index=22)
+
+            try:
+                load_custom_state(self._popart_state, checkpoint_path, index=30)
+            except Exception:
+                # Keep default PopArt stats if unavailable.
+                pass
         except Exception as exc:
             logger.warning(
                 "Could not load VMPO dual states from checkpoint %s: %s",
