@@ -15,6 +15,15 @@ local total_num_iterations = 650;
 
         inference_strategy+: {
             guidance_llm: (import 'guidance_llms/qwen2.5-0.5b-instruct.jsonnet') + { api_base: 'none' },
+            // GSM8K reward extraction expects `#### <answer>`.
+            question_template: '[MATH_TASK] Problem:\n{query}\n\nSolution: Think step by step and end with `#### <final answer>`.',
+            node_expander+: {
+                program_kwargs+: {
+                    // Prevent spillover into the next prompt block.
+                    stop: '"Problem:"',
+                    max_tokens: 512,
+                },
+            },
         },
     },
     num_iterations: total_num_iterations,

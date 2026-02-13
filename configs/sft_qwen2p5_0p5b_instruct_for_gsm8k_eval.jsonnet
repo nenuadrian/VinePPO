@@ -22,8 +22,8 @@ local math_inference_pipeline =
                 program_kwargs: {
                     temperature: temperature,
                     top_p: 0.9,
-                    max_tokens: 1024,
-                    stop: '"\n\n\nProblem:"',
+                    max_tokens: 512,
+                    stop: '"Problem:"',
                 },
                 node_text_template: '{chain_of_thought}',
 

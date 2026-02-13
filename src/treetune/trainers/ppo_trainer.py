@@ -142,6 +142,8 @@ class PPOHParams:
 
 @Trainer.register("ppo")
 class PPOTrainer(DeepSpeedPolicyTrainer):
+    algorithm_name: str = "PPO"
+
     def __init__(
         self,
         num_episodes_per_iteration: int,
@@ -505,7 +507,9 @@ class PPOTrainer(DeepSpeedPolicyTrainer):
             self.num_iterations * num_optimization_steps_in_iteration
         )
 
-        logger.info(f"***** Running a PPO training step: {self.state.iteration}  *****")
+        logger.info(
+            f"***** Running a {self.algorithm_name} training step: {self.state.iteration}  *****"
+        )
 
         logger.info(f"  Num Episodes = {len(episodes):,}")
         logger.info(f"  Num Epochs Per Iteration = {self.num_epochs_per_iteration:,}")

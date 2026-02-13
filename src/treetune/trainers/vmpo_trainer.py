@@ -166,6 +166,8 @@ class _PopArtState:
 
 @Trainer.register("vmpo")
 class VMPOTrainer(PPOTrainer):
+    algorithm_name: str = "VMPO"
+
     @staticmethod
     def _inverse_softplus(x: float) -> float:
         # Numerically stable inverse of softplus for x > 0.
